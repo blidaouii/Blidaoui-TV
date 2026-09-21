@@ -1,7 +1,12 @@
 package com.blidaoui.tv;
 
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.DownloadManager;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
@@ -17,6 +22,7 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.content.SharedPreferences;
 import android.view.Gravity;
+import android.view.Window;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -26,6 +32,8 @@ import android.widget.HorizontalScrollView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.VideoView;
+import android.widget.MediaController;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -45,6 +53,7 @@ public class MainActivity extends android.app.Activity {
     private static final int MUTED = Color.rgb(157, 168, 178);
     private static final int ORANGE = Color.rgb(233, 95, 53);
     private static final String PLAYLIST_URL = "https://raw.githubusercontent.com/free-tv/IPTV/master/playlist.m3u8";
+    private static final String UPDATE_CHANNEL_ID = "app_updates";
     private TextView syncStatus;
     private TextView playlistStatus;
     private LinearLayout playlistContainer;
@@ -62,6 +71,10 @@ public class MainActivity extends android.app.Activity {
         languageCode = getSharedPreferences("settings", MODE_PRIVATE).getString("language", "ar");
         registerUpdateReceiver();
         setContentView(buildScreen());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 42);
+        }
+        checkForUpdateNotification();
     }
 
     @Override
@@ -103,7 +116,7 @@ public class MainActivity extends android.app.Activity {
         brand.addView(label("BLidaoui", 22, Color.WHITE, true));
         brand.addView(label("TV", 13, ORANGE, true));
         brand.addView(label(tr("عالمك على شاشتك", "Your world on screen", "Votre monde à l'écran", "Tu mundo en pantalla", "Ekrandaki dünyan", "Deine Welt auf dem Bildschirm"), 11, MUTED, false));
-        brand.addView(label(tr("كشي وشي", "A little of everything", "Un peu de tout", "Un poco de todo", "Her şeyden biraz", "Von allem etwas"), 11, ORANGE, false));
+        brand.addView(label(tr("كشي وجي", "A little of everything", "Un peu de tout", "Un poco de todo", "Her şeyden biraz", "Von allem etwas"), 11, ORANGE, false));
         header.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
 
         Button refresh = actionButton(tr("تحديث التطبيق", "Update app", "Mettre à jour", "Actualizar", "Uygulamayı güncelle", "App aktualisieren"), ORANGE);
@@ -293,6 +306,8 @@ public class MainActivity extends android.app.Activity {
                 name = comma >= 0 ? line.substring(comma + 1).trim() : "Unnamed channel";
                 group = attribute(line, "group-title");
                 if (group.isEmpty()) group = "Other";
+                String country = attribute(line, "tvg-country");
+                if (!country.isEmpty()) group = country;
             } else if (name != null && !line.isEmpty() && !line.startsWith("#")) {
                 if (line.startsWith("https://")) channels.add(new PlaylistChannel(name, group, line));
                 name = null;
@@ -331,7 +346,7 @@ public class MainActivity extends android.app.Activity {
         card.addView(badge, new LinearLayout.LayoutParams(dp(40), dp(40)));
         LinearLayout details = column();
         details.setPadding(dp(12), 0, 0, 0);
-        details.addView(label(group, 16, Color.WHITE, true));
+        details.addView(label(countryFlag(group) + "  " + group, 16, Color.WHITE, true));
         details.addView(label(channels.size() + " " + tr("قناة", "channels", "chaînes", "canales", "kanal", "Sender"), 12, MUTED, false));
         card.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
         card.addView(label(tr("عرض ›", "View ›", "Voir ›", "Ver ›", "Görüntüle ›", "Ansehen ›"), 13, ORANGE, true));
@@ -346,11 +361,57 @@ public class MainActivity extends android.app.Activity {
     }
 
     private void openStream(PlaylistChannel channel) {
-        try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(channel.url)));
-        } catch (ActivityNotFoundException error) {
-            Toast.makeText(this, tr("لا يوجد مشغل مناسب لهذا البث", "No compatible player found", "Aucun lecteur compatible", "No hay reproductor compatible", "Uyumlu oynatıcı bulunamadı", "Kein kompatibler Player gefunden"), Toast.LENGTH_LONG).show();
+        if (!channel.url.startsWith("https://")) {
+            Toast.makeText(this, tr("تم رفض الرابط غير الآمن", "Unsafe stream rejected", "Flux non sécurisé refusé", "Flujo no seguro rechazado", "Güvensiz yayın reddedildi", "Unsicherer Stream abgelehnt"), Toast.LENGTH_LONG).show();
+            return;
         }
+        Dialog playerDialog = new Dialog(this);
+        playerDialog.setTitle(channel.name);
+        LinearLayout playerLayout = column();
+        playerLayout.setPadding(dp(12), dp(12), dp(12), dp(12));
+        VideoView video = new VideoView(this);
+        video.setVideoURI(Uri.parse(channel.url));
+        MediaController controls = new MediaController(this);
+        controls.setAnchorView(video);
+        video.setMediaController(controls);
+        playerLayout.addView(video, new LinearLayout.LayoutParams(-1, dp(230)));
+        TextView title = label(channelFlagLine(channel) + "\n" + channel.name, 15, Color.WHITE, true);
+        title.setPadding(0, dp(10), 0, 0);
+        playerLayout.addView(title);
+        playerDialog.setContentView(playerLayout);
+        Window window = playerDialog.getWindow();
+        if (window != null) window.setBackgroundDrawableResource(android.R.color.transparent);
+        playerDialog.show();
+        video.setOnPreparedListener(mediaPlayer -> video.start());
+        video.setOnErrorListener((view, what, extra) -> {
+            Toast.makeText(this, tr("تعذر تشغيل هذه القناة", "This channel could not be played", "Impossible de lire cette chaîne", "No se pudo reproducir este canal", "Bu kanal oynatılamadı", "Dieser Sender konnte nicht abgespielt werden"), Toast.LENGTH_LONG).show();
+            return false;
+        });
+    }
+
+    private String channelFlagLine(PlaylistChannel channel) {
+        return countryFlag(channel.group) + "  " + channel.group;
+    }
+
+    private String countryFlag(String country) {
+        String key = country.toLowerCase();
+        if (key.contains("alger") || key.contains("dz") || key.contains("الجزائر")) return "🇩🇿";
+        if (key.contains("morocc") || key.contains("ma") || key.contains("المغرب")) return "🇲🇦";
+        if (key.contains("egypt") || key.contains("eg") || key.contains("مصر")) return "🇪🇬";
+        if (key.contains("saudi") || key.contains("sa") || key.contains("السعودية")) return "🇸🇦";
+        if (key.contains("france") || key.contains("fr") || key.contains("فرنسا")) return "🇫🇷";
+        if (key.contains("united kingdom") || key.contains("uk") || key.contains("england")) return "🇬🇧";
+        if (key.contains("united states") || key.contains("usa") || key.contains("us")) return "🇺🇸";
+        if (key.contains("germany") || key.contains("de") || key.contains("ألمانيا")) return "🇩🇪";
+        if (key.contains("italy") || key.contains("it") || key.contains("إيطاليا")) return "🇮🇹";
+        if (key.contains("spain") || key.contains("es") || key.contains("إسبانيا")) return "🇪🇸";
+        if (key.contains("turkey") || key.contains("tr") || key.contains("تركيا")) return "🇹🇷";
+        if (key.contains("india") || key.contains("in") || key.contains("الهند")) return "🇮🇳";
+        if (key.contains("japan") || key.contains("jp") || key.contains("اليابان")) return "🇯🇵";
+        if (key.contains("brazil") || key.contains("br") || key.contains("البرازيل")) return "🇧🇷";
+        if (key.contains("qatar") || key.contains("qa") || key.contains("قطر")) return "🇶🇦";
+        if (key.contains("uae") || key.contains("emirates") || key.contains("الإمارات")) return "🇦🇪";
+        return "🌐";
     }
 
     private static class PlaylistChannel {
@@ -517,6 +578,59 @@ public class MainActivity extends android.app.Activity {
                 new Handler(Looper.getMainLooper()).post(() -> Toast.makeText(this, tr("تعذر فحص التحديثات", "Could not check for updates", "Impossible de vérifier les mises à jour", "No se pudieron comprobar las actualizaciones", "Güncellemeler kontrol edilemedi", "Updates konnten nicht geprüft werden"), Toast.LENGTH_LONG).show());
             }
         }).start();
+    }
+
+    private void checkForUpdateNotification() {
+        new Thread(() -> {
+            try {
+                URL api = new URL("https://api.github.com/repos/blidaouii/Blidaoui-TV/releases/latest");
+                HttpURLConnection connection = (HttpURLConnection) api.openConnection();
+                connection.setConnectTimeout(6000);
+                connection.setReadTimeout(8000);
+                connection.setRequestProperty("Accept", "application/vnd.github+json");
+                if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) return;
+                BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) response.append(line);
+                reader.close();
+                JSONObject release = new JSONObject(response.toString());
+                String latest = release.optString("tag_name", "").replace("v", "");
+                String notified = getSharedPreferences("settings", MODE_PRIVATE).getString("notified_release", "");
+                String current = "1.0.0";
+                try {
+                    current = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+                } catch (Exception ignored) {
+                }
+                if (!latest.isEmpty() && isNewerVersion(latest, current) && !latest.equals(notified)) {
+                    getSharedPreferences("settings", MODE_PRIVATE).edit().putString("notified_release", latest).apply();
+                    new Handler(Looper.getMainLooper()).post(() -> notifyUpdate(latest));
+                }
+            } catch (Exception ignored) {
+            }
+        }).start();
+    }
+
+    private void notifyUpdate(String version) {
+        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(UPDATE_CHANNEL_ID, "App updates", NotificationManager.IMPORTANCE_DEFAULT);
+            manager.createNotificationChannel(channel);
+        }
+        Intent intent = new Intent(this, MainActivity.class);
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 100, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(this, UPDATE_CHANNEL_ID)
+                : new Notification.Builder(this);
+        builder.setSmallIcon(com.blidaoui.tv.R.drawable.ic_tv)
+                .setContentTitle(tr("تحديث جديد متاح", "New update available", "Nouvelle mise à jour", "Nueva actualización", "Yeni güncelleme", "Neues Update"))
+                .setContentText(tr("الإصدار ", "Version ", "Version ", "Versión ", "Sürüm ", "Version ") + version)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true);
+        try {
+            manager.notify(1001, builder.build());
+        } catch (SecurityException ignored) {
+        }
     }
 
     private void handleUpdateResult(String latestVersion, String apkUrl) {
